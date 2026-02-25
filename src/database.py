@@ -2,7 +2,8 @@ import duckdb
 from loguru import logger
 from pathlib import Path
 
-DB_PATH = Path('data/trading_system.duckdb')
+BASE_DIR = Path(__file__).resolve().parents[1]
+DB_PATH = BASE_DIR / 'data' / 'trading_system.duckdb'
 
 def get_connection() -> duckdb.DuckDBPyConnection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
