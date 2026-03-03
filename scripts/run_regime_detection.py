@@ -1,16 +1,3 @@
-"""
-Run Regime Detection Pipeline  (v2)
-=====================================
-Changes from v1:
-  - Passes featured_df directly to clf (scaler inside model now)
-  - Adds regime distribution check before saving
-  - Better logging of what went wrong if distribution is degenerate
-  - Diagnosis mode: prints feature statistics per regime
-
-Run from project root:
-    python scripts/run_regime_detection.py
-"""
-
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -31,7 +18,7 @@ from src.models.regime_data_splitter import RegimeDataSplitter
 # ── Config ─────────────────────────────────────────────────────────────────
 MODEL_SAVE_PATH = "data/models/hmm_regime_classifier.pkl"
 TRAIN_RATIO     = 0.70
-SYMBOL          = "EURUSD=X"
+SYMBOL          = "USDCAD=X"
 
 
 def load_price_data(con) -> pd.DataFrame:
@@ -130,7 +117,7 @@ N_REGIMES = 3
 
 def run():
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║  Week 3 – HMM Regime Detection Pipeline v2  ║")
+    logger.info("║   HMM Regime Detection Pipeline v2  ║")
     logger.info("╚══════════════════════════════════════════════╝")
 
     # ── 1. Connect ─────────────────────────────────────────────────────────
@@ -157,7 +144,7 @@ def run():
     logger.info(f"Split → Train: {len(featured_train):,} | Test: {len(featured_test):,}")
 
     # ── 5. Train HMM ───────────────────────────────────────────────────────
-    logger.info("Step 5: Training Gaussian HMM (v2 with scaling + restarts)...")
+    logger.info("Step 5: Training Gaussian HMM (with scaling + restarts)...")
     clf = HMMRegimeClassifier(
         n_components=3,
         n_iter=300,

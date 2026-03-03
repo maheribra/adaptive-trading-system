@@ -30,7 +30,25 @@ def run_pipeline():
     logger.info('--- Computing DXY signals ---')
     dxy_df = compute_dxy_signals(con)
     if not dxy_df.is_empty():
-        con.execute('INSERT OR REPLACE INTO dxy_signals SELECT * FROM dxy_df')
+        con.register("dxy_df", dxy_df)
+
+        con.execute("""
+            INSERT OR REPLACE INTO dxy_signals (
+                timestamp,
+                close,
+                dxy_pct_change,
+                dxy_ma5,
+                dxy_bullish
+            )
+            SELECT
+                timestamp,
+                close,
+                dxy_pct_change,
+                dxy_ma5,
+                dxy_bullish
+            FROM dxy_df
+        """)
+
         logger.success(f'Stored {len(dxy_df)} DXY signal rows')
 
     # 5. Summary

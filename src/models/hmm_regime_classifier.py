@@ -1,19 +1,3 @@
-"""
-HMM Market Regime Classifier  v3
-==================================
-Regimes:
-    0 = RANGING     - low volatility, choppy sideways movement
-    1 = TRENDING    - directional momentum, sustained price moves
-    2 = NEWS_DRIVEN - sharp volatility spikes, large candles
-
-v3 fixes:
-    - Removed volume_zscore  (FX CSVs have no volume — was all zeros)
-    - Removed return_autocorr (rolling corr was silently returning 0)
-    - Replaced with: atr_ratio, bb_position, momentum_consistency
-    - These 3 are pure price-based and cleanly separate all 3 regimes
-    - Regime scoring rewritten to use only reliable features
-"""
-
 import numpy as np
 import pandas as pd
 from pathlib import Path
