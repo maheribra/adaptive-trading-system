@@ -7,6 +7,7 @@ import pandas as pd
 from loguru import logger
 
 from src.database import get_connection, create_schema
+from src.fetchers.yahoo_fetcher import load_dxy_from_csv
 from src.models.hmm_regime_classifier import (
     HMMRegimeClassifier,
     engineer_features,
@@ -18,7 +19,9 @@ from src.models.regime_data_splitter import RegimeDataSplitter
 # ── Config ─────────────────────────────────────────────────────────────────
 MODEL_SAVE_PATH = "data/models/hmm_regime_classifier.pkl"
 TRAIN_RATIO     = 0.70
-SYMBOL          = "USDCAD=X"
+SYMBOL          = "GBPUSD=X"
+
+N_REGIMES = 3
 
 
 def load_price_data(con) -> pd.DataFrame:
@@ -48,8 +51,17 @@ def load_news_data(con) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_dxy_data(con) -> pd.DataFrame:
+    logger.info("Loading DXY data...")
+    dxy_df = load_dxy_from_csv(con)
+    if dxy_df.empty:
+        logger.warning("DXY data is empty — DXY features will be zeroed out")
+    else:
+        logger.info(f"Loaded {len(dxy_df):,} DXY bars")
+    return dxy_df
+
+
 def diagnose_features(featured_df: pd.DataFrame):
-    """Print feature statistics so we can see if features are discriminative."""
     logger.info("── Feature Statistics ─────────────────────────────────────")
     stats = featured_df[FEATURE_COLS].describe().round(4)
     for col in FEATURE_COLS:
@@ -64,7 +76,6 @@ def diagnose_features(featured_df: pd.DataFrame):
 
 
 def diagnose_regime_means(featured_df: pd.DataFrame):
-    """After labelling, print mean feature value per regime — key sanity check."""
     logger.info("── Mean Feature Values per Regime ─────────────────────────")
     header = f"{'Feature':20s}" + "".join(f"{REGIME_LABELS[i]:>14s}" for i in range(3))
     logger.info(header)
@@ -95,8 +106,8 @@ def walk_forward_validate(
 
 def analyse_regime_transitions(labelled_df: pd.DataFrame):
     logger.info("── Regime Transition Matrix ───────────────────────────────")
-    regimes  = labelled_df["regime"].values
-    matrix   = np.zeros((N_REGIMES, N_REGIMES), dtype=int)
+    regimes = labelled_df["regime"].values
+    matrix  = np.zeros((N_REGIMES, N_REGIMES), dtype=int)
     for i in range(len(regimes) - 1):
         matrix[regimes[i], regimes[i + 1]] += 1
 
@@ -112,12 +123,9 @@ def analyse_regime_transitions(labelled_df: pd.DataFrame):
     logger.info("───────────────────────────────────────────────────────────")
 
 
-N_REGIMES = 3
-
-
 def run():
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║   HMM Regime Detection Pipeline v2  ║")
+    logger.info("║   HMM Regime Detection Pipeline v4  ║")
     logger.info("╚══════════════════════════════════════════════╝")
 
     # ── 1. Connect ─────────────────────────────────────────────────────────
@@ -127,28 +135,29 @@ def run():
     # ── 2. Load data ───────────────────────────────────────────────────────
     price_df = load_price_data(con)
     news_df  = load_news_data(con)
+    dxy_df   = load_dxy_data(con)
 
     if len(price_df) < 600:
         logger.error(f"Only {len(price_df)} bars. Need ≥600. Run pipeline.py first.")
         return
 
     # ── 3. Feature engineering ─────────────────────────────────────────────
-    logger.info("Step 3: Engineering features (v2)...")
-    featured_df = engineer_features(price_df, news_df)
+    logger.info("Step 3: Engineering features (v4)...")
+    featured_df = engineer_features(price_df, news_df, dxy_df)
     diagnose_features(featured_df)
 
-    # ── 4. Walk-forward split (NO shuffle — time series!) ──────────────────
+    # ── 4. Walk-forward split ──────────────────────────────────────────────
     split_idx      = int(len(featured_df) * TRAIN_RATIO)
     featured_train = featured_df.iloc[:split_idx].copy()
     featured_test  = featured_df.iloc[split_idx:].copy()
     logger.info(f"Split → Train: {len(featured_train):,} | Test: {len(featured_test):,}")
 
     # ── 5. Train HMM ───────────────────────────────────────────────────────
-    logger.info("Step 5: Training Gaussian HMM (with scaling + restarts)...")
+    logger.info("Step 5: Training Gaussian HMM...")
     clf = HMMRegimeClassifier(
         n_components=3,
-        n_iter=300,
-        covariance_type="full",
+        n_iter=200,
+        covariance_type="diag",
         n_restarts=5,
     )
     clf.fit(featured_train)
@@ -160,7 +169,7 @@ def run():
     # ── 7. Label full dataset ──────────────────────────────────────────────
     logger.info("Step 7: Labelling full dataset...")
     splitter      = RegimeDataSplitter(clf)
-    regime_splits = splitter.run(price_df, news_df, save=True)
+    regime_splits = splitter.run(price_df, news_df, dxy_df=dxy_df, save=True)
 
     # ── 8. Diagnose regime means ───────────────────────────────────────────
     labelled_df = pd.read_parquet("data/regimes/full_labelled_dataset.parquet")
@@ -183,7 +192,7 @@ def run():
     total = len(labelled_df)
     logger.info("")
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║              PIPELINE SUMMARY  v2            ║")
+    logger.info("║              PIPELINE SUMMARY  v4            ║")
     logger.info("╠══════════════════════════════════════════════╣")
     logger.info(f"║  Total bars labelled : {total:>8,}              ║")
     for label, df in regime_splits.items():

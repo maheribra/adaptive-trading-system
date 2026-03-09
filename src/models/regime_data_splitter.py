@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from loguru import logger
-from typing import Dict, Tuple
+from typing import Dict, Optional
 
 from .hmm_regime_classifier import (
     HMMRegimeClassifier,
@@ -27,43 +27,22 @@ OUTPUT_DIR = Path("data/regimes")
 
 
 class RegimeDataSplitter:
-    """
-    Orchestrates the full regime-labelling and splitting pipeline.
-
-    Usage
-    -----
-        splitter = RegimeDataSplitter(clf)
-        splits   = splitter.run(price_df, news_df)
-        # splits = {"RANGING": df, "TRENDING": df, "NEWS_DRIVEN": df}
-    """
 
     def __init__(self, classifier: HMMRegimeClassifier):
         self.clf = classifier
 
-    # ── Main entry point ────────────────────────────────────────────────────
     def run(
         self,
         price_df: pd.DataFrame,
         news_df: pd.DataFrame = None,
+        dxy_df: pd.DataFrame = None,
         save: bool = True,
     ) -> Dict[str, pd.DataFrame]:
-        """
-        Full pipeline: engineer features → predict regimes → split → validate.
 
-        Parameters
-        ----------
-        price_df : OHLCV DataFrame (timestamp, open, high, low, close, volume)
-        news_df  : News events DataFrame (optional)
-        save     : If True, save splits as Parquet to data/regimes/
-
-        Returns
-        -------
-        Dict mapping regime name → DataFrame
-        """
         logger.info("=== Regime Data Splitter Started ===")
 
         # Step 1 – Engineer features
-        featured_df = engineer_features(price_df, news_df)
+        featured_df = engineer_features(price_df, news_df, dxy_df)
 
         # Step 2 – Extract feature matrix
         X = featured_df[FEATURE_COLS].values.astype(np.float32)
@@ -97,7 +76,6 @@ class RegimeDataSplitter:
         logger.success("=== Regime Data Splitter Complete ===")
         return splits
 
-    # ── Internal helpers ────────────────────────────────────────────────────
     def _split(self, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         splits = {}
         for regime_id, label in REGIME_LABELS.items():
@@ -136,8 +114,7 @@ class RegimeDataSplitter:
                 f"({pct:5.1f}%)  avg confidence: {avg_conf:.3f}"
             )
 
-        # Transition analysis – how often does the regime change?
-        transitions = (full_df["regime"] != full_df["regime"].shift(1)).sum()
+        transitions  = (full_df["regime"] != full_df["regime"].shift(1)).sum()
         avg_duration = total / (transitions + 1)
         logger.info(f"  Total transitions: {transitions:,}")
         logger.info(f"  Avg regime duration: {avg_duration:.1f} bars")
@@ -146,13 +123,11 @@ class RegimeDataSplitter:
     def _save(self, splits: Dict[str, pd.DataFrame], full_df: pd.DataFrame):
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Save individual splits
         for label, df in splits.items():
             path = OUTPUT_DIR / f"{label.lower()}_data.parquet"
             df.to_parquet(path, index=False)
             logger.success(f"Saved {label} → {path}")
 
-        # Save full labelled dataset
         full_path = OUTPUT_DIR / "full_labelled_dataset.parquet"
         full_df.to_parquet(full_path, index=False)
         logger.success(f"Saved full labelled dataset → {full_path}")
