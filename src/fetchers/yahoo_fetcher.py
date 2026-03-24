@@ -54,7 +54,8 @@ def load_from_csv(con: duckdb.DuckDBPyConnection):
                 continue
 
             con.register("temp_df", df)
-            con.execute("INSERT OR REPLACE INTO prices SELECT * FROM temp_df")
+            con.execute(f"DELETE FROM prices WHERE symbol = '{symbol}'")
+            con.execute("INSERT INTO prices SELECT * FROM temp_df")
             logger.success(f"Loaded {len(df)} rows for {symbol}")
 
         except Exception as e:

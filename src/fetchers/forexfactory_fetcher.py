@@ -11,8 +11,18 @@ HIGH_IMPACT = [
     'GDP', 'Unemployment', 'Retail Sales', 'PCE', 'FOMC'
 ]
 
+EVENT_FILES = {
+    "CPI":          "CPI.csv",
+    "NFP":          "NFP.csv",
+    "Unemployment": "Unemployment.csv",
+    "RetailSales":  "RetailSales.csv",
+    "FED_RATE":     "FED_RATE.csv",
+}
+
+
 def is_high_impact(title: str) -> bool:
     return any(k.lower() in title.lower() for k in HIGH_IMPACT)
+
 
 def fetch_news_events() -> pl.DataFrame:
     logger.info('Fetching ForexFactory RSS...')
@@ -39,43 +49,67 @@ def fetch_news_events() -> pl.DataFrame:
         return pl.DataFrame()
 
 
-def load_cpi_from_csv() -> pl.DataFrame:
+def load_events_from_csv() -> pl.DataFrame:
     BASE_DIR = Path(__file__).resolve().parents[2]
-    CPI_FILE = BASE_DIR / "data" / "raw" / "cpi_events.csv"
+    DATA_DIR = BASE_DIR / "data" / "raw"
 
-    if not CPI_FILE.exists():
-        logger.warning(f"cpi_events.csv not found at {CPI_FILE}")
+    all_dfs = []
+
+    for event_name, filename in EVENT_FILES.items():
+        filepath = DATA_DIR / filename
+
+        if not filepath.exists():
+            logger.warning(f"{filename} not found — skipping {event_name}")
+            continue
+
+        try:
+            raw = pd.read_csv(filepath)
+            raw.columns = [c.lower() for c in raw.columns]
+
+            # Rename time column
+            for col in ['time', 'datetime', 'date']:
+                if col in raw.columns:
+                    raw = raw.rename(columns={col: 'event_time'})
+                    break
+
+            # Auto-detect value column
+            skip_cols = {'event_time', 'forecast', 'previous', 'deviation', 'currency', 'impact', 'title'}
+            value_cols = [c for c in raw.columns if c not in skip_cols]
+            if value_cols:
+                raw = raw.rename(columns={value_cols[0]: 'actual'})
+
+            raw['title']    = event_name
+            raw['currency'] = 'USD'
+            raw['impact']   = 'High'
+
+            for col in ['forecast', 'previous', 'deviation']:
+                if col not in raw.columns:
+                    raw[col] = None
+
+            raw = raw[['event_time', 'title', 'currency', 'impact', 'actual', 'forecast', 'previous', 'deviation']]
+            raw['actual'] = raw['actual'].astype(str)
+
+            df = pl.from_pandas(raw)
+            logger.success(f"Loaded {len(df)} rows from {filename}")
+            all_dfs.append(df)
+
+        except Exception as e:
+            logger.error(f"Error loading {filename}: {e}")
+
+    if not all_dfs:
+        logger.warning("No event CSV files loaded")
         return pl.DataFrame()
 
-    logger.info("Loading CPI events from cpi_events.csv...")
+    combined = pl.concat(all_dfs)
+    logger.success(f"Total news events loaded: {len(combined)}")
+    return combined
 
-    try:
-        raw = pd.read_csv(CPI_FILE)
-        raw.columns = [c.lower() for c in raw.columns]
 
-        # Rename columns to match news_events schema
-        cpi_col = [c for c in raw.columns if 'cpi' in c.lower()][0]
-        raw = raw.rename(columns={'time': 'event_time', cpi_col: 'actual'})
-
-        raw['title']    = 'CPI'
-        raw['currency'] = 'USD'
-        raw['impact']   = 'High'
-        raw['forecast'] = None
-        raw['previous'] = None
-        raw['deviation'] = None
-
-        raw = raw[['event_time', 'title', 'currency', 'impact', 'actual', 'forecast', 'previous', 'deviation']]
-        raw['actual'] = raw['actual'].astype(str)
-
-        df = pl.from_pandas(raw)
-        logger.success(f"Loaded {len(df)} CPI rows from CSV")
-        return df
-
-    except Exception as e:
-        logger.error(f"Error loading cpi_events.csv: {e}")
-        return pl.DataFrame()
+# Keep for backwards compatibility
+def load_cpi_from_csv() -> pl.DataFrame:
+    return load_events_from_csv()
 
 
 if __name__ == '__main__':
-    df = load_cpi_from_csv()
+    df = load_events_from_csv()
     print(df)

@@ -19,7 +19,7 @@ from src.models.regime_data_splitter import RegimeDataSplitter
 # ── Config ─────────────────────────────────────────────────────────────────
 MODEL_SAVE_PATH = "data/models/hmm_regime_classifier.pkl"
 TRAIN_RATIO     = 0.70
-SYMBOL          = "GBPUSD=X"
+SYMBOL          = "EURUSD=X"
 
 N_REGIMES = 3
 
