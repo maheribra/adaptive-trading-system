@@ -19,9 +19,8 @@ from src.models.regime_data_splitter import RegimeDataSplitter
 # ── Config ─────────────────────────────────────────────────────────────────
 MODEL_SAVE_PATH = "data/models/hmm_regime_classifier.pkl"
 TRAIN_RATIO     = 0.70
-SYMBOL          = "EURUSD=X"
-
-N_REGIMES = 3
+SYMBOL          = "USDJPY=X"
+N_REGIMES       = 3
 
 
 def load_price_data(con) -> pd.DataFrame:
@@ -61,8 +60,21 @@ def load_dxy_data(con) -> pd.DataFrame:
     return dxy_df
 
 
-def diagnose_features(featured_df: pd.DataFrame):
-    logger.info("── Feature Statistics ─────────────────────────────────────")
+def split_news_by_date(news_df: pd.DataFrame, split_date: pd.Timestamp) -> tuple:
+    """Split news events chronologically around split_date."""
+    if news_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    news_df = news_df.copy()
+    news_df["event_time"] = pd.to_datetime(news_df["event_time"], utc=True, errors="coerce")
+    split_date_utc = pd.Timestamp(split_date).tz_localize("UTC") if split_date.tzinfo is None else split_date
+    news_train = news_df[news_df["event_time"] <= split_date_utc].copy()
+    news_test  = news_df[news_df["event_time"] >  split_date_utc].copy()
+    return news_train, news_test
+
+
+def diagnose_features(featured_df: pd.DataFrame, label: str = ""):
+    tag = f" [{label}]" if label else ""
+    logger.info(f"── Feature Statistics{tag} ──────────────────────────────")
     stats = featured_df[FEATURE_COLS].describe().round(4)
     for col in FEATURE_COLS:
         s = stats[col]
@@ -125,14 +137,14 @@ def analyse_regime_transitions(labelled_df: pd.DataFrame):
 
 def run():
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║   HMM Regime Detection Pipeline v4  ║")
+    logger.info("║   HMM Regime Detection Pipeline v5          ║")
     logger.info("╚══════════════════════════════════════════════╝")
 
     # ── 1. Connect ─────────────────────────────────────────────────────────
     con = get_connection()
     create_schema(con)
 
-    # ── 2. Load data ───────────────────────────────────────────────────────
+    # ── 2. Load raw data ───────────────────────────────────────────────────
     price_df = load_price_data(con)
     news_df  = load_news_data(con)
     dxy_df   = load_dxy_data(con)
@@ -141,24 +153,43 @@ def run():
         logger.error(f"Only {len(price_df)} bars. Need ≥600. Run pipeline.py first.")
         return
 
-    # ── 3. Feature engineering ─────────────────────────────────────────────
-    logger.info("Step 3: Engineering features (v4)...")
-    featured_df = engineer_features(price_df, news_df, dxy_df)
-    diagnose_features(featured_df)
+    # ── 3. Chronological split on RAW price data FIRST ────────────────────
+    # This is the key fix: split before feature engineering so rolling
+    # windows never look into the future (no data leakage).
+    logger.info("Step 3: Splitting raw data chronologically BEFORE feature engineering...")
+    split_idx       = int(len(price_df) * TRAIN_RATIO)
+    price_train_raw = price_df.iloc[:split_idx].copy().reset_index(drop=True)
+    price_test_raw  = price_df.iloc[split_idx:].copy().reset_index(drop=True)
 
-    # ── 4. Walk-forward split ──────────────────────────────────────────────
-    split_idx      = int(len(featured_df) * TRAIN_RATIO)
-    featured_train = featured_df.iloc[:split_idx].copy()
-    featured_test  = featured_df.iloc[split_idx:].copy()
-    logger.info(f"Split → Train: {len(featured_train):,} | Test: {len(featured_test):,}")
+    split_date  = pd.to_datetime(price_df.iloc[split_idx]["timestamp"])
+    logger.info(f"  Split date : {split_date}")
+    logger.info(f"  Train bars : {len(price_train_raw):,}")
+    logger.info(f"  Test bars  : {len(price_test_raw):,}")
 
-    # ── 5. Train HMM ───────────────────────────────────────────────────────
-    logger.info("Step 5: Training Gaussian HMM...")
+    # Split news chronologically too
+    news_train, news_test = split_news_by_date(news_df, split_date)
+    logger.info(f"  Train news : {len(news_train):,} events")
+    logger.info(f"  Test news  : {len(news_test):,} events")
+
+    # ── 4. Feature engineering on train and test SEPARATELY ───────────────
+    # Scaler is fit only on training data inside clf.fit() below.
+    # Features for each split use only their own history — no leakage.
+    logger.info("Step 4: Engineering features on TRAIN set...")
+    featured_train = engineer_features(price_train_raw, news_train, dxy_df)
+    diagnose_features(featured_train, label="TRAIN")
+
+    logger.info("Step 4b: Engineering features on TEST set...")
+    featured_test = engineer_features(price_test_raw, news_test, dxy_df)
+    diagnose_features(featured_test, label="TEST")
+
+    # ── 5. Train HMM on training features only ────────────────────────────
+    # StandardScaler inside clf.fit() is fit ONLY on featured_train.
+    logger.info("Step 5: Training Gaussian HMM on TRAIN set only...")
     clf = HMMRegimeClassifier(
         n_components=3,
         n_iter=200,
-        covariance_type="diag",
-        n_restarts=5,
+        covariance_type="full",   # full covariance — more expressive than diag
+        n_restarts=10,
     )
     clf.fit(featured_train)
 
@@ -166,12 +197,18 @@ def run():
     logger.info("Step 6: Walk-forward validation...")
     val = walk_forward_validate(clf, featured_train, featured_test)
 
-    # ── 7. Label full dataset ──────────────────────────────────────────────
-    logger.info("Step 7: Labelling full dataset...")
-    splitter      = RegimeDataSplitter(clf)
-    regime_splits = splitter.run(price_df, news_df, dxy_df=dxy_df, save=True)
+    # ── 7. Label full dataset without leakage ─────────────────────────────
+    # Concatenate already-featured train+test — do NOT re-engineer on full
+    # price_df as that would recompute rolling windows across the split boundary.
+    logger.info("Step 7: Labelling full dataset (train + test concatenated)...")
+    featured_train["split"] = "train"
+    featured_test["split"]  = "test"
+    full_featured = pd.concat([featured_train, featured_test]).reset_index(drop=True)
 
-    # ── 8. Diagnose regime means ───────────────────────────────────────────
+    splitter      = RegimeDataSplitter(clf)
+    regime_splits = splitter.run_on_featured(full_featured, save=True)
+
+    # ── 8. Diagnose regime means & transitions ────────────────────────────
     labelled_df = pd.read_parquet("data/regimes/full_labelled_dataset.parquet")
     diagnose_regime_means(labelled_df)
     analyse_regime_transitions(labelled_df)
@@ -181,7 +218,9 @@ def run():
     regime_records = labelled_df[["timestamp", "regime_label", "confidence"]].copy()
     regime_records.columns = ["timestamp", "regime", "confidence"]
     con.execute("DELETE FROM market_regimes")
-    con.execute("INSERT INTO market_regimes SELECT timestamp, regime, confidence FROM regime_records")
+    con.execute(
+        "INSERT INTO market_regimes SELECT timestamp, regime, confidence FROM regime_records"
+    )
     stored = con.execute("SELECT COUNT(*) FROM market_regimes").fetchone()[0]
     logger.success(f"Stored {stored:,} regime labels in DuckDB")
 
@@ -192,15 +231,16 @@ def run():
     total = len(labelled_df)
     logger.info("")
     logger.info("╔══════════════════════════════════════════════╗")
-    logger.info("║              PIPELINE SUMMARY  v4            ║")
+    logger.info("║              PIPELINE SUMMARY  v5            ║")
     logger.info("╠══════════════════════════════════════════════╣")
     logger.info(f"║  Total bars labelled : {total:>8,}              ║")
     for label, df in regime_splits.items():
-        pct = 100 * len(df) / total
+        pct    = 100 * len(df) / total
         status = "✓" if len(df) >= 100 else "✗"
         logger.info(f"║  {label:12s}  {status}  {len(df):>8,}  ({pct:5.1f}%)        ║")
     logger.info(f"║  Train LL / bar     : {val['train_ll']:>10.4f}              ║")
     logger.info(f"║  Test  LL / bar     : {val['test_ll']:>10.4f}              ║")
+    logger.info(f"║  Gap                : {val['gap']:>10.4f}              ║")
     logger.info(f"║  Model saved        : {MODEL_SAVE_PATH:<28s}║")
     logger.info("╚══════════════════════════════════════════════╝")
 

@@ -38,16 +38,39 @@ class RegimeDataSplitter:
         dxy_df: pd.DataFrame = None,
         save: bool = True,
     ) -> Dict[str, pd.DataFrame]:
-
+        """
+        Original method — engineers features internally.
+        Only use this if you have NOT already engineered features externally.
+        For the fixed pipeline, use run_on_featured() instead.
+        """
         logger.info("=== Regime Data Splitter Started ===")
 
-        # Step 1 – Engineer features
         featured_df = engineer_features(price_df, news_df, dxy_df)
+        return self._predict_and_split(featured_df, save)
 
-        # Step 2 – Extract feature matrix
+    def run_on_featured(
+        self,
+        featured_df: pd.DataFrame,
+        save: bool = True,
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Use this when features are already engineered externally (preferred).
+        Avoids re-engineering features on the full dataset which causes
+        rolling-window leakage from future data into the past.
+        """
+        logger.info("=== Regime Data Splitter Started (pre-featured) ===")
+        return self._predict_and_split(featured_df.copy(), save)
+
+    def _predict_and_split(
+        self,
+        featured_df: pd.DataFrame,
+        save: bool,
+    ) -> Dict[str, pd.DataFrame]:
+
+        # Extract feature matrix
         X = featured_df[FEATURE_COLS].values.astype(np.float32)
 
-        # Step 3 – Predict regimes + confidence
+        # Predict regimes + confidence
         logger.info("Predicting regimes on full dataset...")
         regimes    = self.clf.predict(X)
         confidence = self.clf.confidence(X)
@@ -60,16 +83,16 @@ class RegimeDataSplitter:
         featured_df["prob_trending"]    = probs[:, 1]
         featured_df["prob_news_driven"] = probs[:, 2]
 
-        # Step 4 – Split by regime
+        # Split by regime
         splits = self._split(featured_df)
 
-        # Step 5 – Validate
+        # Validate
         self._validate(splits)
 
-        # Step 6 – Distribution report
+        # Distribution report
         self._report(featured_df, splits)
 
-        # Step 7 – Save
+        # Save
         if save:
             self._save(splits, featured_df)
 
@@ -88,7 +111,7 @@ class RegimeDataSplitter:
         logger.info("Validating regime sample counts...")
         all_ok = True
         for label, df in splits.items():
-            count = len(df)
+            count  = len(df)
             status = "✓" if count >= MIN_SAMPLES_PER_REGIME else "✗ INSUFFICIENT"
             logger.info(
                 f"  {label:12s}: {count:,} samples  {status}"
@@ -107,7 +130,7 @@ class RegimeDataSplitter:
         total = len(full_df)
         logger.info("── Regime Distribution Report ─────────────────────")
         for label, df in splits.items():
-            pct = 100 * len(df) / total if total > 0 else 0
+            pct      = 100 * len(df) / total if total > 0 else 0
             avg_conf = df["confidence"].mean() if len(df) > 0 else 0
             logger.info(
                 f"  {label:12s}: {len(df):6,} bars  "
