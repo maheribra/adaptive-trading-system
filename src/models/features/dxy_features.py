@@ -53,6 +53,9 @@ def build_dxy_features(
     dxy = dxy_df.copy()
     dxy["timestamp"] = pd.to_datetime(dxy["timestamp"]).dt.tz_localize(None)
 
+    df["timestamp"] = df["timestamp"].astype("datetime64[ns]")
+    dxy["timestamp"] = dxy["timestamp"].astype("datetime64[ns]")
+
     # Normalise column name
     if "dxy" in dxy.columns:
         dxy = dxy.rename(columns={"dxy": "dxy_close"})
@@ -164,12 +167,12 @@ if __name__ == "__main__":
     assert DXY_CSV.exists(), f"Not found: {DXY_CSV}"
 
     price_df = pd.read_parquet(RANGING)
-    price_df["timestamp"] = pd.to_datetime(price_df["timestamp"]).astype("datetime64[ns]")
+    price_df["timestamp"] = pd.to_datetime(price_df["timestamp"]).dt.tz_localize(None).astype("datetime64[ns]")
 
     dxy_df = pd.read_csv(DXY_CSV)
     dxy_df.columns = [c.lower() for c in dxy_df.columns]
     dxy_df = dxy_df.rename(columns={"time": "timestamp"})
-    dxy_df["timestamp"] = pd.to_datetime(dxy_df["timestamp"]).astype("datetime64[ns]")
+    dxy_df["timestamp"] = pd.to_datetime(dxy_df["timestamp"]).dt.tz_localize(None).astype("datetime64[ns]")
 
     result = build_dxy_features(price_df, dxy_df)
     print(result[DXY_FEATURE_COLS + ["next_bar_up"]].head())
