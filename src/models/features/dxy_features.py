@@ -45,6 +45,22 @@ def build_dxy_features(
     merges them on timestamp, and builds DXY correlation features.
 
     dxy_df must have columns: [timestamp, dxy] or [timestamp, close]
+
+    IMPORTANT — regime_confidence dependency:
+        This function uses a 'confidence' column from df as the
+        regime_confidence feature. This column is produced by the HMM
+        classifier (HMMRegimeClassifier.confidence()).
+
+        At training time: automatically present in ranging_data.parquet.
+        At inference time: the meta-controller MUST run the HMM first
+            and add a 'confidence' column to the bar DataFrame before
+            calling this function or dxy_model.predict().
+
+        Inference call order:
+            1. engineer_features(raw_bars)
+            2. hmm.predict() + hmm.confidence()  → adds 'confidence' col
+            3. build_dxy_features(bars_with_confidence, dxy_df)
+            4. dxy_model.predict()
     """
     df  = df.copy().sort_values("timestamp").reset_index(drop=True)
     df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
@@ -67,12 +83,12 @@ def build_dxy_features(
     dxy = dxy[["timestamp", "dxy_close"]].drop_duplicates("timestamp")
 
     # ── Merge price + DXY on nearest timestamp ─────────────────────────────
+    # ── Merge price + DXY on nearest timestamp ─────────────────────────────
     df = pd.merge_asof(
-        df.sort_values("timestamp"),
+        df.sort_values("timestamp"),  # <--- CHANGED 'bars' TO 'df'
         dxy.sort_values("timestamp"),
         on="timestamp",
-        direction="nearest",
-        tolerance=pd.Timedelta("2h"),
+        direction="backward"
     )
 
     missing_dxy = df["dxy_close"].isna().sum()
@@ -134,9 +150,24 @@ def build_dxy_features(
     df["dxy_close_position"]   = ((df["dxy_close"] - dxy_14_low) / dxy_14_range).clip(0, 1)
 
     # ── Regime confidence (already in parquet) ─────────────────────────────
+    # ── Regime confidence (injected by meta-controller or from parquet) ────
+    # At training time: comes from the HMM confidence column in
+    #   ranging_data.parquet (produced by regime_data_splitter.py).
+    # At inference time: the meta-controller must run the HMM first and
+    #   inject the confidence score into the DataFrame before calling
+    #   build_dxy_features() or dxy_model.predict().
+    # If missing, we fall back to 0.5 (neutral) and log a warning —
+    #   this should never happen in production.
     if "confidence" in df.columns:
         df["regime_confidence"] = df["confidence"].clip(0, 1)
     else:
+        logger.warning(
+            "regime_confidence: 'confidence' column not found in DataFrame. "
+            "Falling back to 0.5 (neutral). "
+            "At inference time the meta-controller must inject HMM confidence "
+            "before calling build_dxy_features() or dxy_model.predict(). "
+            "This should not happen in production."
+        )
         df["regime_confidence"] = 0.5
 
     # ── Target label ───────────────────────────────────────────────────────

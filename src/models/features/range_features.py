@@ -37,10 +37,12 @@ RANGE_FEATURE_COLS = [
 
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Standard Wilder's RSI using Exponential Moving Averages."""
     delta = series.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / (loss + 1e-9)
+    # Use ewm for smoother, more standard RSI signals
+    gain = delta.clip(lower=0).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / (loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
 
@@ -69,6 +71,7 @@ def build_range_features(df: pd.DataFrame) -> pd.DataFrame:
     bb_range       = (bb_upper - bb_lower).replace(0, 1e-9)
     df["bb_position"] = (df["close"] - bb_lower) / bb_range   # 0=lower band, 1=upper band
     df["bb_width"]    = bb_range / (ma20 + 1e-9)              # band width normalised
+    df["bb_squeeze"] = (std20 * 2) / (ma20 + 1e-9)
 
     # ── RSI ────────────────────────────────────────────────────────────────
     df["rsi_14"]       = _rsi(df["close"], 14)

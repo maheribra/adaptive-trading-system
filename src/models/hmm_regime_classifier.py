@@ -28,18 +28,13 @@ N_RESTARTS     = 10
 MIN_STATE_PCT  = 0.05  # reject any model where a state owns <5% of data
 
 FEATURE_COLS = [
-    "volatility",
-    "vol_regime",
-    "volatility_spike",
-    "atr_ratio",
-    "trend_strength",
-    "hl_range_norm",
+    "volatility",      # Index 0
+    "vol_regime",      # Index 1
+    "volatility_spike",# Index 2
+    "atr_ratio",       # Index 3
+    "trend_strength",  # Index 4
+    "hl_range_norm",   # Index 5
 ]
-
-
-# ══════════════════════════════════════════════════════════════════════════
-#  FEATURE ENGINEERING
-# ══════════════════════════════════════════════════════════════════════════
 
 def engineer_features(
     df: pd.DataFrame,
@@ -108,18 +103,12 @@ def engineer_features(
     )
     return df
 
-
-# ══════════════════════════════════════════════════════════════════════════
-#  HMM CLASSIFIER
-# ══════════════════════════════════════════════════════════════════════════
-
 class HMMRegimeClassifier:
-
     def __init__(
         self,
         n_components: int = N_REGIMES,
         n_iter: int = 200,
-        covariance_type: str = "full",   # changed from diag → full
+        covariance_type: str = "full",
         n_restarts: int = N_RESTARTS,
         random_state: int = 42,
         tol: float = 1e-4,
@@ -145,10 +134,6 @@ class HMMRegimeClassifier:
         return np.nan_to_num(arr.astype(np.float64), nan=0.0, posinf=0.0, neginf=0.0)
 
     def _is_degenerate(self, model: GaussianHMM, scaled: np.ndarray) -> bool:
-        """
-        Returns True if any HMM state owns less than MIN_STATE_PCT of the data.
-        A degenerate model has collapsed states that don't represent real regimes.
-        """
         state_seq    = model.predict(scaled)
         state_counts = np.bincount(state_seq, minlength=self.n_components)
         min_pct      = state_counts.min() / len(state_seq)
@@ -165,7 +150,6 @@ class HMMRegimeClassifier:
         if len(raw) < MIN_TRAIN_BARS:
             raise ValueError(f"Need ≥{MIN_TRAIN_BARS} bars. Got {len(raw)}.")
 
-        # ── Fit scaler ONLY on training data (whatever X is passed in) ────
         if self._scaler is not None:
             scaled = self._scaler.fit_transform(raw)
         else:
@@ -173,13 +157,7 @@ class HMMRegimeClassifier:
             self._sd  = raw.std(0) + 1e-9
             scaled    = (raw - self._mu) / self._sd
 
-        logger.info(
-            f"Training HMM: {len(scaled):,} bars | "
-            f"{self.n_components} states | "
-            f"{self.n_iter} iters | "
-            f"{self.n_restarts} restarts | "
-            f"cov={self.covariance_type}"
-        )
+        logger.info(f"Training HMM: {len(scaled):,} bars | {self.n_components} states")
 
         best_model, best_score = None, -np.inf
 
@@ -191,73 +169,46 @@ class HMMRegimeClassifier:
                     n_iter=self.n_iter,
                     tol=self.tol,
                     random_state=self.random_state + i,
-                    verbose=False,
                 )
                 m.fit(scaled)
                 s = m.score(scaled)
-                logger.debug(f"  Restart {i+1}/{self.n_restarts} score: {s:.2f}")
-
-                # ── Reject degenerate solutions ────────────────────────────
                 if self._is_degenerate(m, scaled):
                     continue
-
                 if s > best_score:
                     best_score, best_model = s, m
-
             except Exception as e:
                 logger.warning(f"  Restart {i+1} failed: {e}")
 
         if best_model is None:
-            raise RuntimeError(
-                "All HMM restarts failed or were degenerate. "
-                "Try increasing n_restarts or lowering MIN_STATE_PCT."
-            )
+            raise RuntimeError("All HMM restarts failed or were degenerate.")
 
         self._model     = best_model
         self._state_map = self._resolve_mapping()
         self.is_fitted  = True
-
-        logger.success(
-            f"HMM trained (best score: {best_score:.2f}). Mapping: " +
-            ", ".join(
-                f"state{k}→{REGIME_LABELS[v]}"
-                for k, v in sorted(self._state_map.items())
-            )
-        )
+        logger.success(f"HMM trained (best score: {best_score:.2f})")
         return self
 
     def _resolve_mapping(self) -> Dict[int, int]:
+        """
+        UPDATED LOGIC:
+        Strictly differentiates between 'Clean Trends' and 'News Shocks'.
+        """
         means  = self._model.means_
         scores = np.zeros((self.n_components, N_REGIMES))
 
         for s in range(self.n_components):
             m = means[s]
 
-            # RANGING: low vol, low vol_regime, no spike, low atr, low trend
-            scores[s, 0] = (
-                -m[0]
-                -m[1]
-                -m[2]
-                -m[3]
-                -m[4]
-            )
+            # RANGING: Low volatility, low trend, low range
+            scores[s, 0] = (-m[0] - m[1] - m[2] - m[3] - m[4])
 
-            # TRENDING: high trend, high atr, high vol_regime, no spike
-            scores[s, 1] = (
-                 m[4]
-                + m[3]
-                + m[1]
-                - m[2]
-                + m[0]
-            )
+            # TRENDING: High trend strength & ATR, but HEAVILY penalize spikes
+            # This ensures 'Trending' only captures smooth directional moves.
+            scores[s, 1] = (m[4] * 2.0) + m[3] - (m[2] * 4.0) + m[0]
 
-            # NEWS_DRIVEN: spike=1, high vol, high hl_range
-            scores[s, 2] = (
-                 m[2]
-                + m[0]
-                + m[5]
-                + m[1]
-            )
+            # NEWS_DRIVEN: Volatility spike is the primary driver.
+            # Even if there is a trend, a spike forces this regime.
+            scores[s, 2] = (m[2] * 6.0) + m[0] + m[5] + m[1]
 
         mapping: Dict[int, int] = {}
         used: set = set()
@@ -299,13 +250,8 @@ class HMMRegimeClassifier:
             raw    = self._to_array(X)
             scaled = self._scale(raw)
             total  = self._model.score(scaled)
-            per_bar = total / max(len(scaled), 1)
-            if not np.isfinite(per_bar) or per_bar < -1e4:
-                logger.warning(f"Log-likelihood overflow ({per_bar:.2f}) — clamping to -999")
-                return -999.0
-            return float(per_bar)
-        except Exception as e:
-            logger.warning(f"Log-likelihood calculation failed: {e}")
+            return float(total / max(len(scaled), 1))
+        except:
             return -999.0
 
     def _check_fitted(self):
