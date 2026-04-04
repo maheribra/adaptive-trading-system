@@ -36,15 +36,41 @@ NEWS_FEATURE_COLS = [
 ]
 
 
+# Columns that must already exist in the DataFrame —
+# produced by the HMM feature engineering step.
+_REQUIRED_HMM_COLS = [
+    "volatility_spike",
+    "volatility",
+    "vol_regime",
+    "atr_ratio",
+    "hl_range_norm",
+]
+
+
 def build_news_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Takes a price DataFrame with HMM features already computed
     (from news_driven_data.parquet) and adds news-specific features.
 
+    Required input columns (produced by engineer_features() in
+    hmm_regime_classifier.py — present in news_driven_data.parquet):
+        volatility_spike, volatility, vol_regime, atr_ratio, hl_range_norm
+
     Target (next_bar_up):
         1 = next bar closes higher than current close
         0 = next bar closes lower or equal
     """
+    # ── Guard: HMM-derived columns must already exist ──────────────────────
+    missing = [c for c in _REQUIRED_HMM_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"build_news_features() requires HMM-derived columns that are "
+            f"missing from the input DataFrame: {missing}\n"
+            f"These are produced by engineer_features() in "
+            f"hmm_regime_classifier.py and saved into news_driven_data.parquet.\n"
+            f"Do not pass raw OHLCV data directly to this function."
+        )
+
     df = df.copy().sort_values("timestamp").reset_index(drop=True)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 

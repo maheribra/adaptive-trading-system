@@ -148,30 +148,34 @@ class TrendModel:
         logger.info("───────────────────────────────────────────────────────")
 
     def walk_forward_validate(
-        self,
-        df: pd.DataFrame,
-        n_splits: int = 5,
+            self,
+            df: pd.DataFrame,
+            n_splits: int = 5,
     ) -> Dict[str, float]:
         """
-        Time-series cross validation.
+        Time-series cross validation with per-fold scaler.
         Returns mean accuracy and std across folds.
         """
         X, y = self._prepare(df)
-        X_scaled = self._scaler.transform(X.clip(-10, 10))
+        X_raw = X.values  # unscaled — scaler fit fresh per fold
 
-        tscv    = TimeSeriesSplit(n_splits=n_splits)
-        scores  = []
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        scores = []
 
-        for fold, (train_idx, test_idx) in enumerate(tscv.split(X_scaled)):
+        for fold, (train_idx, test_idx) in enumerate(tscv.split(X_raw)):
+            fold_scaler = StandardScaler()
+            X_fold_train = fold_scaler.fit_transform(X_raw[train_idx])
+            X_fold_test = fold_scaler.transform(X_raw[test_idx])
+
             m = xgb.XGBClassifier(**self.params)
-            m.fit(X_scaled[train_idx], y[train_idx], verbose=False)
-            preds  = m.predict(X_scaled[test_idx])
-            acc    = accuracy_score(y[test_idx], preds)
+            m.fit(X_fold_train, y[train_idx], verbose=False)
+            preds = m.predict(X_fold_test)
+            acc = accuracy_score(y[test_idx], preds)
             scores.append(acc)
-            logger.info(f"  Fold {fold+1}/{n_splits} accuracy: {acc:.4f}")
+            logger.info(f"  Fold {fold + 1}/{n_splits} accuracy: {acc:.4f}")
 
         mean_acc = float(np.mean(scores))
-        std_acc  = float(np.std(scores))
+        std_acc = float(np.std(scores))
         logger.info(f"  Walk-forward mean: {mean_acc:.4f} ± {std_acc:.4f}")
         return {"mean_accuracy": mean_acc, "std_accuracy": std_acc, "folds": scores}
 

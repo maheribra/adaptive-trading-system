@@ -42,8 +42,8 @@ class RangeModel:
             random_state = random_state,
             solver       = "lbfgs",
         )
-        self._model   = None
-        self._scaler  = StandardScaler()
+        self._model    = None
+        self._scaler   = StandardScaler()
         self.is_fitted = False
         self.feature_importance_: Optional[pd.Series] = None
 
@@ -53,30 +53,21 @@ class RangeModel:
             df = build_range_features(df)
 
         X = df[RANGE_FEATURE_COLS].copy()
-
-        # Clip extreme values — fixes the dist_from_vwap 1e+11 issue
         X = X.clip(-10, 10)
-
         y = df[TARGET_COL].values
         return X, y
 
     def fit(self, df: pd.DataFrame) -> "RangeModel":
-        """
-        Train on ranging regime data.
-        Expects raw price df OR already-featured df.
-        Uses chronological train/test split internally.
-        """
         X, y = self._prepare(df)
 
         if len(X) < MIN_BARS:
             raise ValueError(f"Need ≥{MIN_BARS} bars. Got {len(X)}.")
 
-        # Chronological split
         split_idx = int(len(X) * TRAIN_RATIO)
         X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
         y_train, y_test = y[:split_idx], y[split_idx:]
 
-        # Fit scaler on train only
+        # Scaler fit on train only — this scaler is kept for inference
         X_train_scaled = self._scaler.fit_transform(X_train)
         X_test_scaled  = self._scaler.transform(X_test)
 
@@ -87,18 +78,14 @@ class RangeModel:
 
         self._model = LogisticRegression(**self.params)
         self._model.fit(X_train_scaled, y_train)
-
         self.is_fitted = True
 
-        # Feature importance (coefficients for logistic regression)
         self.feature_importance_ = pd.Series(
             np.abs(self._model.coef_[0]),
             index=RANGE_FEATURE_COLS,
         ).sort_values(ascending=False)
 
-        # Evaluate
         self._evaluate(X_train_scaled, y_train, X_test_scaled, y_test)
-
         return self
 
     def _evaluate(self, X_train, y_train, X_test, y_test):
@@ -134,21 +121,22 @@ class RangeModel:
         df: pd.DataFrame,
         n_splits: int = 5,
     ) -> Dict[str, float]:
-        """
-        Time-series cross validation.
-        Returns mean accuracy and std across folds.
-        """
         X, y = self._prepare(df)
-        X_scaled = self._scaler.transform(X.clip(-10, 10))
+        X_raw = X.values  # numpy array, unscaled
 
         tscv   = TimeSeriesSplit(n_splits=n_splits)
         scores = []
 
-        for fold, (train_idx, test_idx) in enumerate(tscv.split(X_scaled)):
+        for fold, (train_idx, test_idx) in enumerate(tscv.split(X_raw)):
+            # ── Key fix: fresh scaler fit only on this fold's train slice ──
+            fold_scaler = StandardScaler()
+            X_fold_train = fold_scaler.fit_transform(X_raw[train_idx])
+            X_fold_test  = fold_scaler.transform(X_raw[test_idx])
+
             m = LogisticRegression(**self.params)
-            m.fit(X_scaled[train_idx], y[train_idx])
-            preds  = m.predict(X_scaled[test_idx])
-            acc    = accuracy_score(y[test_idx], preds)
+            m.fit(X_fold_train, y[train_idx])
+            preds = m.predict(X_fold_test)
+            acc   = accuracy_score(y[test_idx], preds)
             scores.append(acc)
             logger.info(f"  Fold {fold+1}/{n_splits} accuracy: {acc:.4f}")
 
@@ -160,14 +148,12 @@ class RangeModel:
     def predict(self, df: pd.DataFrame) -> np.ndarray:
         self._check_fitted()
         X, _ = self._prepare(df)
-        X_scaled = self._scaler.transform(X.clip(-10, 10))
-        return self._model.predict(X_scaled)
+        return self._model.predict(self._scaler.transform(X.clip(-10, 10)))
 
     def predict_proba(self, df: pd.DataFrame) -> np.ndarray:
         self._check_fitted()
         X, _ = self._prepare(df)
-        X_scaled = self._scaler.transform(X.clip(-10, 10))
-        return self._model.predict_proba(X_scaled)
+        return self._model.predict_proba(self._scaler.transform(X.clip(-10, 10)))
 
     def _check_fitted(self):
         if not self.is_fitted:
