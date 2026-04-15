@@ -105,7 +105,7 @@ def run_simulation(mtf_data, mode, start_date=None, end_date=None):
 
     # State Variables
     cash, inventory, trade_count = 10000.0, 0, 0
-    sl_price, tp_price, entry_price = 0.0, 0.0, 0.0
+    entry_price, bars_held = 0.0, 0
     position_type, pending_4h_fvg = None, None
 
     # Metrics tracking
@@ -116,12 +116,16 @@ def run_simulation(mtf_data, mode, start_date=None, end_date=None):
     cached_signal = None
 
     start_idx, end_idx = 50, len(df_15m)
-    print(f" Running {mode} Simulation...")
+    print(f" Running {mode} Simulation (Optimized for Dashboard Sync)...")
 
     for i in range(start_idx, end_idx):
         ts = df_15m.index[i]
         bar_15m = df_15m.iloc[i]
         price = bar_15m['close']
+
+        # --- 0. SAFETY INITIALIZATION ---
+        # Defining these at the start of EVERY bar ensures the "Unbound" error can never happen
+        in_zone = False
 
         # --- PROGRESS BAR ---
         if i % 250 == 0:
@@ -129,37 +133,31 @@ def run_simulation(mtf_data, mode, start_date=None, end_date=None):
             sys.stdout.write(f"\rProgress: [{int(percent)}%] processing {i}/{end_idx}...")
             sys.stdout.flush()
 
-        # --- 1. EXIT LOGIC ---
+        # --- 1. EXIT LOGIC (Time-Based) ---
         if position_type:
-            trade_closed = False
-            if position_type == "LONG":
-                if bar_15m['low'] <= sl_price:
-                    cash += inventory * sl_price
-                    losses += 1
-                    trade_closed = True
-                elif bar_15m['high'] >= tp_price:
-                    cash += inventory * tp_price
-                    wins += 1
-                    trade_closed = True
-            elif position_type == "SHORT":
-                if bar_15m['high'] >= sl_price:
-                    # For shorts: Profit = (Entry - Exit) * Quantity
-                    cash += abs(inventory) * (entry_price - sl_price)
-                    losses += 1
-                    trade_closed = True
-                elif bar_15m['low'] <= tp_price:
-                    cash += abs(inventory) * (entry_price - tp_price)
-                    wins += 1
-                    trade_closed = True
-
-            if trade_closed:
-                inventory, position_type = 0, None
+            bars_held += 1
+            if bars_held >= 4:
+                if position_type == "LONG":
+                    profit = (price - entry_price) * inventory
+                    cash += (inventory * entry_price) + profit
+                    if price > entry_price:
+                        wins += 1
+                    else:
+                        losses += 1
+                else:
+                    profit = (entry_price - price) * abs(inventory)
+                    cash += profit
+                    if price < entry_price:
+                        wins += 1
+                    else:
+                        losses += 1
+                inventory, position_type, bars_held = 0, None, 0
                 continue
 
-                # --- 2. PREDICTION CACHING (Performance & Silence) ---
+        # --- 2. PREDICTION CACHING ---
         current_h1_ts = ts.floor('H')
         if current_h1_ts != last_h1_ts:
-            hist_1h = df_1h[df_1h.index <= ts]
+            hist_1h = df_1h[df_1h.index <= ts].tail(200)
             with open(os.devnull, 'w') as fnull:
                 old_stdout = sys.stdout
                 sys.stdout = fnull
@@ -169,79 +167,68 @@ def run_simulation(mtf_data, mode, start_date=None, end_date=None):
                     sys.stdout = old_stdout
             last_h1_ts = current_h1_ts
 
-        # --- 3. ENTRY LOGIC (Fixed 1% Risk Model) ---
+        # --- 3. ENTRY LOGIC ---
         if not position_type:
-            risk_pct = 0.01  # Risk 1% of current cash per trade
+            risk_pct = 0.01
 
+            # MODE: HMM
             if mode == "HMM" and cached_signal:
-                entry_price = price
-                if cached_signal.signal == "BUY":
-                    sl_price = entry_price - (entry_price * 0.005)  # 0.5% SL
-                    tp_price = entry_price + (entry_price - sl_price) * 2
+                if cached_signal.signal in ["BUY", "SELL"]:
+                    entry_price, bars_held, trade_count = price, 0, trade_count + 1
+                    risk_dist = entry_price * 0.005
+                    qty = (cash * risk_pct) / risk_dist
+                    if cached_signal.signal == "BUY":
+                        position_type, inventory = "LONG", qty
+                        cash -= (qty * entry_price)
+                    else:
+                        position_type, inventory = "SHORT", -qty
 
-                    # Math: (Cash * 0.01) / Price Distance to SL
-                    risk_amount = cash * risk_pct
-                    inventory = risk_amount / abs(entry_price - sl_price)
-                    cash -= (inventory * entry_price)
-                    position_type, trade_count = "LONG", trade_count + 1
-
-                elif cached_signal.signal == "SELL":
-                    sl_price = entry_price + (entry_price * 0.005)
-                    tp_price = entry_price - (sl_price - entry_price) * 2
-
-                    risk_amount = cash * risk_pct
-                    inventory = -(risk_amount / abs(entry_price - sl_price))
-                    # Cash doesn't decrease for shorts in this simplified model until exit
-                    position_type, trade_count = "SHORT", trade_count + 1
-
+            # MODE: FVG or HYBRID
             elif mode in ["FVG", "Hybrid"]:
-                hist_4h = df_4h[df_4h.index <= ts]
+                # 1. Look back slightly further for 4H context
+                hist_4h = df_4h[df_4h.index <= ts].tail(100)
                 found_fvg = get_fvg_box(hist_4h)
-                if found_fvg: pending_4h_fvg = found_fvg
+                if found_fvg:
+                    pending_4h_fvg = found_fvg
 
                 if pending_4h_fvg:
-                    in_zone = price < pending_4h_fvg['top'] and price > pending_4h_fvg['bottom']
+                    # Sync Buffer: 0.0006 (6 pips) to match Dashboard sensitivity
+                    buffer = price * 0.0006
+                    in_zone = (price <= (pending_4h_fvg['top'] + buffer)) and \
+                              (price >= (pending_4h_fvg['bottom'] - buffer))
+
                     if in_zone:
-                        hmm_permission = True
+                        permission = True
                         if mode == "Hybrid" and cached_signal:
+                            # DASHBOARD SYNC: Use a more lenient 'Regime' check
+                            # Regime 1 = Bullish, Regime 2 = Bearish
+                            curr_regime = getattr(cached_signal, 'regime', 0)
+
                             if pending_4h_fvg['type'] == "LONG":
-                                hmm_permission = (cached_signal.signal == "BUY") or (
-                                            getattr(cached_signal, 'regime', 0) == 1)
+                                # Permission if BUY signal OR if we are simply in Bullish Regime
+                                permission = (cached_signal.signal == "BUY") or (curr_regime == 1)
                             else:
-                                hmm_permission = (cached_signal.signal == "SELL") or (
-                                            getattr(cached_signal, 'regime', 0) == 2)
+                                # Permission if SELL signal OR if we are simply in Bearish Regime
+                                permission = (cached_signal.signal == "SELL") or (curr_regime == 2)
 
-                        if hmm_permission:
-                            confirm_fvg = None
-                            for lookback in range(3, 10):
-                                subset = df_15m.iloc[i - lookback: i + 1]
-                                found = get_fvg_box(subset)
-                                if found and found['type'] == pending_4h_fvg['type']:
-                                    confirm_fvg = found
-                                    break
+                        if permission:
+                            entry_price, bars_held, trade_count = price, 0, trade_count + 1
+                            risk_dist = entry_price * 0.005
+                            qty = (cash * risk_pct) / risk_dist
 
-                            if confirm_fvg:
-                                entry_price = price
-                                sl_price = confirm_fvg['sl']
-                                risk_dist = abs(entry_price - sl_price)
-                                if risk_dist == 0: risk_dist = entry_price * 0.001
+                            if pending_4h_fvg['type'] == "LONG":
+                                position_type, inventory = "LONG", qty
+                                cash -= (qty * entry_price)
+                            else:
+                                position_type, inventory = "SHORT", -qty
 
-                                risk_amount = cash * risk_pct
-                                qty = risk_amount / risk_dist
-
-                                if pending_4h_fvg['type'] == "LONG":
-                                    tp_price = entry_price + (risk_dist * 2)
-                                    inventory, cash = qty, cash - (qty * entry_price)
-                                else:
-                                    tp_price = entry_price - (risk_dist * 2)
-                                    inventory = -qty
-
-                                position_type, trade_count = pending_4h_fvg['type'], trade_count + 1
-                                pending_4h_fvg = None
+                            # Clear current FVG to prevent immediate re-entry on next 15m bar
+                            pending_4h_fvg = None
 
     # --- FINAL WRAP UP ---
     sys.stdout.write("\n")
     final_val = cash
+    # If a trade is still open at the very end of the data, close it at market
     if position_type == "LONG":
         final_val = cash + (inventory * df_15m['close'].iloc[-1])
     elif position_type == "SHORT":

@@ -25,22 +25,27 @@ class FVGModel:
             }
         return None
 
-    def predict(self, bars_df: pd.DataFrame):
+    def predict(self, bars_df: pd.DataFrame, context_df: pd.DataFrame = None):
         """
         Analyzes the last 3 candles for a Fair Value Gap.
-        Returns a signal object compatible with the MetaController.
+        If context_df (4h) is provided, it filters signals based on HTF bias.
         """
         if len(bars_df) < 5:
             return type('Signal', (), {'signal': 'NEUTRAL', 'confidence': 0})
 
-        # 1. Calculate ATR (to keep sensitivity relative to volatility)
-        # Standard 14-period range
+        # 1. HTF Bias Detection (Only if context_df is provided)
+        bias = "NEUTRAL"
+        if context_df is not None and len(context_df) >= 2:
+            # Check if the most recent 4h candle closed higher than the previous
+            last_4h = context_df['close'].iloc[-1]
+            prev_4h = context_df['close'].iloc[-2]
+            bias = "BULLISH" if last_4h > prev_4h else "BEARISH"
+
+        # 2. Standard ATR & Gap Logic (Same as your original)
         recent_range = (bars_df['high'] - bars_df['low']).tail(14)
         atr = recent_range.mean()
         min_gap = atr * self.min_gap_atr_multiple
 
-        # 2. Get the 3-candle sequence (t-2, t-1, t)
-        # Candle 0 (Oldest), Candle 1 (Middle), Candle 2 (Current/Newest)
         c0_high, c0_low = bars_df['high'].iloc[-3], bars_df['low'].iloc[-3]
         c2_high, c2_low = bars_df['high'].iloc[-1], bars_df['low'].iloc[-1]
 
@@ -48,19 +53,20 @@ class FVGModel:
         confidence = 0.0
 
         # 3. Detection Logic
-        # Bullish FVG: Low of current candle is higher than High of 2 candles ago
         bullish_gap = c2_low - c0_high
-
-        # Bearish FVG: High of current candle is lower than Low of 2 candles ago
         bearish_gap = c0_low - c2_high
 
+        # 4. Filter Signals by Bias (If bias is active)
         if bullish_gap > min_gap:
-            signal = "BUY"
-            confidence = min(1.0, bullish_gap / atr)  # Confidence scales with gap size
+            # If bias is BULLISH or if we have no context, allow the BUY
+            if bias in ["BULLISH", "NEUTRAL"]:
+                signal = "BUY"
+                confidence = min(1.0, bullish_gap / atr)
 
         elif bearish_gap > min_gap:
-            signal = "SELL"
-            confidence = min(1.0, bearish_gap / atr)
+            # If bias is BEARISH or if we have no context, allow the SELL
+            if bias in ["BEARISH", "NEUTRAL"]:
+                signal = "SELL"
+                confidence = min(1.0, bearish_gap / atr)
 
-        # Return structured object for MetaController
         return type('Signal', (), {'signal': signal, 'confidence': confidence})

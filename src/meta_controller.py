@@ -126,26 +126,34 @@ class MetaController:
         logger.success(f"MetaController Online | MODE: {self.mode}")
         return self
 
-    def _is_price_in_fvg(self, df: pd.DataFrame) -> bool:
-        """
-        Calls the external FVGModel to see if an imbalance exists.
-        """
+    def _is_price_in_fvg(self, df: pd.DataFrame, context_df: pd.DataFrame = None) -> bool:
         if self._fvg is None:
             return False
 
-        # Use the logic from your new fvg_model.py
-        result = self._fvg.predict(df)
+        # Pass the context_df to the FVG model.
+        # If it's None, the FVG model just does a standard single-TF check.
+        result = self._fvg.predict(df, context_df=context_df)
 
-        # If the signal is BUY or SELL, it means a gap was detected
         return result.signal != "NEUTRAL"
 
-    def predict(self, bars_df: pd.DataFrame, dxy_df: pd.DataFrame = None, news_df: pd.DataFrame = None) -> Signal:
+    def predict(
+            self,
+            bars_df: pd.DataFrame,
+            dxy_df: pd.DataFrame = None,
+            news_df: pd.DataFrame = None,
+            context_df: pd.DataFrame = None  # <--- Added at the end with default None
+    ) -> Signal:
+        """
+        Predicts signal based on regime.
+        Old scripts calling mc.predict(df, dxy, news) will still work perfectly.
+        """
         if not self.is_loaded:
             raise RuntimeError("MetaController not loaded.")
 
-        # 1. Feature Engineering & HMM Logic
+        # 1. Feature Engineering (This uses bars_df and news_df as usual)
         featured = engineer_features(bars_df, news_df=news_df)
-        if len(featured) == 0: return self._hold_signal("RANGING", 0, 0.0, 0, "")
+        if len(featured) == 0:
+            return self._hold_signal("RANGING", 0, 0.0, 0, "")
 
         raw_regime = int(self._hmm.predict(featured)[-1])
         confidence = float(self._hmm.confidence(featured)[-1])
@@ -156,7 +164,7 @@ class MetaController:
         label = REGIME_LABELS[conf_regime]
 
         # 2. Hybrid Checklist
-        in_fvg = self._is_price_in_fvg(bars_df)
+        in_fvg = self._is_price_in_fvg(bars_df, context_df=context_df)
 
         # 3. Decision Gate based on Mode
         if self.mode == "Hybrid":
