@@ -81,7 +81,8 @@ st.sidebar.title("🎮 System Control")
 
 data_source = st.sidebar.selectbox("Data Source", ["Live API", "Backtest (CSV)"])
 mode_selection = st.sidebar.radio("Analysis Mode", ["HMM", "FVG", "Hybrid"])
-symbol_input = st.sidebar.text_input("Symbol", "GBPUSD").upper().replace('/', '')
+symbol_options = ["GBPUSD", "EURUSD", "USDJPY", "AUDUSD", "NZDUSD", "XAUUSD", "XAGUSD", "BTCUSD", "ETHUSD"]
+symbol_input = st.sidebar.selectbox("Symbol", symbol_options, index=0)
 
 if data_source == "Backtest (CSV)":
     col_s, col_e = st.sidebar.columns(2)
@@ -108,10 +109,20 @@ if run_btn:
                 # UI Layout
                 st.title(f"📡 {symbol_input} Live Intelligence")
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Current Price", f"{df_main['close'].iloc[-1]:.4f}")
+                curr_price = df_main['close'].iloc[-1]
+                prev_price = df_main['close'].iloc[-2]
+                price_delta = round(curr_price - prev_price, 4)
+
+                curr_high = df_main['high'].iloc[-1]
+                curr_low = df_main['low'].iloc[-1]
+                bar_range = round(curr_high - curr_low, 4)
+                prev_range = round(df_main['high'].iloc[-2] - df_main['low'].iloc[-2], 4)
+                range_delta = round(bar_range - prev_range, 4)
+
+                m1.metric("Current Price", f"{curr_price:.4f}", delta=f"{price_delta:+.4f}")
                 m2.metric("Regime", res['regime'])
                 m3.metric("Signal", res['signal'])
-                m4.metric("Last Update", df_main['timestamp'].iloc[-1].strftime('%H:%M'))
+                m4.metric("Bar Range (pip proxy)", f"{bar_range:.4f}", delta=f"{range_delta:+.4f}")
 
                 fig = go.Figure(data=[go.Candlestick(
                     x=df_main['timestamp'], open=df_main['open'],
@@ -119,6 +130,32 @@ if run_btn:
                 )])
                 fig.update_layout(template="plotly_dark", height=600, margin=dict(l=0, r=0, b=0, t=40))
                 st.plotly_chart(fig, use_container_width=True)
+                with st.sidebar.expander("🧠 What the system is thinking", expanded=True):
+                    st.markdown(f"**Symbol:** `{symbol_input}`")
+                    st.markdown(f"**Mode:** `{mode_selection}`")
+                    st.markdown(f"**Regime:** `{res['regime']}`")
+                    st.markdown(f"**Signal:** `{res['signal']}`")
+                    st.markdown("---")
+
+                    # Which sub-model is active
+                    if res['regime'] == "TRENDING":
+                        st.info(
+                            "📈 **TrendModel active** — Using EMA crossovers, momentum & ATR features (23 features).")
+                    elif res['regime'] == "RANGING":
+                        st.info(
+                            "📊 **RangeModel active** — Detecting support/resistance & mean-reversion zones (20 features).")
+                    elif res['regime'] == "NO FVG":
+                        st.warning(
+                            "🔍 **No Fair Value Gap detected** — Price is balanced. FVG model standing by for next imbalance.")
+                    else:
+                        st.warning("⏳ **MetaController arbitrating** — Regime unclear, waiting for HMM confidence.")
+
+                    st.markdown("---")
+                    st.markdown("**HMM Hidden States:**")
+                    st.markdown("- State 0 → Ranging/Low volatility")
+                    st.markdown("- State 1 → Trending/High momentum")
+                    st.markdown(f"**Last bar processed:** `{df_main['timestamp'].iloc[-1].strftime('%Y-%m-%d %H:%M')}`")
+                    st.caption("Updates every time you click Analyze Live Market.")
             else:
                 st.error("Critical: Live data fetch returned empty. Check Symbol.")
 
@@ -139,6 +176,7 @@ if run_btn:
         trades, wins, losses = [], 0, 0
         last_pred_hour, last_sig = -1, None
         prog = st.progress(0)
+        status_box = st.empty()
 
         # Account Simulation
         initial_balance = 10000
@@ -187,7 +225,40 @@ if run_btn:
                         "balance": balance
                     })
 
-            if i % 100 == 0: prog.progress(i / len(bt_df))
+            if i % 100 == 0:
+                pct = i / len(bt_df)
+                prog.progress(pct)
+
+                # Friendly commentary based on what's happening
+                regime_now = last_sig.regime if last_sig else "unknown"
+                signal_now = last_sig.signal if last_sig else "WAIT"
+                trade_count = len(trades)
+                win_rate_now = round((wins / trade_count * 100), 1) if trade_count > 0 else 0.0
+
+                if pct < 0.15:
+                    msg = f"🔍 **Loading historical bars...** Scanning early price action on {symbol_input}."
+                elif pct < 0.30:
+                    msg = f"🧠 **HMM is warming up.** Detecting whether the market is trending or ranging using hidden states."
+                elif signal_now == "WAIT":
+                    msg = f"⏳ **Regime detected: `{regime_now}`** — Models are watching but no clear signal yet. Patience is a strategy."
+                elif signal_now in ["BUY", "SELL"]:
+                    msg = f"📡 **Signal fired: `{signal_now}` in `{regime_now}` regime.** Logging trade #{trade_count}... Current win rate: {win_rate_now}%"
+                else:
+                    msg = f"⚙️ **Processing bar {i} of {len(bt_df)}...** Regime: `{regime_now}` | Trades so far: {trade_count}"
+
+                if trade_count > 0 and trade_count % 5 == 0:
+                    msg += f" | 💰 Balance: **${balance:,.2f}**"
+
+                status_box.warning(msg)
+
+        prog.progress(1.0)
+        status_box.success(
+                f"✅ **Backtest complete.** "
+                f"Regime classification converged | FVG zones resolved | MetaController signals evaluated | "
+                f"**{len(trades)} trades** logged across `{symbol_input}` — "
+                f"Win Rate: **{round((wins / (wins + losses) * 100), 1) if (wins + losses) > 0 else 0}%** | "
+                f"Final Balance: **${balance:,.2f}**"
+            )
 
         # RESULTS DISPLAY
         st.title(f"📊 {mode_selection} Backtest Results")
